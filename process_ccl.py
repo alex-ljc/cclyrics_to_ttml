@@ -14,7 +14,7 @@ import pickle
 from webvtt import WebVTT, Caption
 import enchant
 
-def format_timedelta(td):
+def format_timedelta(td: timedelta) -> str:
     """Utility function to format timedelta objects in a cool way (e.g 00:00:20.05) 
     omitting microseconds and retaining milliseconds"""
     td = td-timedelta(days=td.days)
@@ -30,7 +30,7 @@ def format_timedelta(td):
     formatted = f"{result}.{ms:03}"
     return formatted
 
-def mse_between_frames(frame1, frame2):
+def mse_between_frames(frame1: np.ndarray, frame2: np.ndarray) -> float:
     if frame1 is None or frame2 is None:
         return 0
     difference = cv2.subtract(frame1, frame2)
@@ -38,54 +38,50 @@ def mse_between_frames(frame1, frame2):
     size = frame1.shape[0] * frame1.shape[1]
     return (np.sum(b ** 2) + np.sum(g ** 2) + np.sum(r ** 2)) / size
 
-# def mse_between_frames(frame1, frame2):
-#     if frame1 is None or frame2 is None:
-#         return 0
-#     frame1 = cv2.cvtColor(frame1, cv2.COLOR_BGR2GRAY)
-#     frame2 = cv2.cvtColor(frame2, cv2.COLOR_BGR2GRAY)
-#     diff = cv2.subtract(frame1, frame2)
-#     size = frame1.shape[0] * frame1.shape[1]
-#     return np.sum(diff ** 2) / size
+def is_different_frame(frame1: np.ndarray, frame2: np.ndarray) -> bool:
+    return mse_between_frames(frame1, frame2) > 0.5
 
-def ccl_to_frames(video_file, dir = './recent'):
-    if not os.path.exists(dir):
-        os.makedirs(dir)
-        
+def ccl_to_frames(video_file: str, dir = './recent'):
+    print("Converting ccl to frames...")
     cap = cv2.VideoCapture(video_file)
     fps = cap.get(cv2.CAP_PROP_FPS)
-    
-    prev_frame = None
-    count = 0
     
     frame_x_begin = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) * 0.56)
     frame_x_end = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     frame_y = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-   
-    frames = [] 
-    # If i see a change skip the next two frames and insert the future frame
+    
+    count = 0
+    unique_frames = []
+    transitioning = False
+    previous_frame = None
+    pre_transition_frame = None
     while True:
-        is_read, frame = cap.read()
-        if not is_read:
+        read, frame = cap.read()
+        if not read:
             break
         
-        frame_duration = count / fps
-        # Crop needs to not be hard coded
-        frame = frame[frame_x_begin:frame_x_end, 0:frame_y]
-
-        if mse_between_frames(prev_frame, frame) > 0.5 or prev_frame is None: 
-            frame_duration_formatted = format_timedelta(timedelta(seconds=frame_duration))
-            prev_frame = frame
-            print(f"Writing frame {frame_duration_formatted}")
-            cv2.imwrite(os.path.join(dir, f"{frame_duration_formatted}.jpg"), frame)
-            frames.append((timedelta(seconds=frame_duration), frame))
-            
+        cropped = frame[frame_x_begin:frame_x_end, 0:frame_y]
         count += 1
-    return frames
+        
+        if is_different_frame(previous_frame, cropped) and not transitioning:
+            transitioning = True
+            pre_transition_frame = previous_frame
+            print("Found transition start with mse: ", mse_between_frames(previous_frame, cropped), " and time: ", timedelta(seconds=count / fps))
+        elif not is_different_frame(previous_frame, cropped) and is_different_frame(cropped, pre_transition_frame) and transitioning:
+            transitioning = False
+            print("Found new unique frame with mse: ", mse_between_frames(previous_frame, cropped), " and time: ", timedelta(seconds=count / fps))
+            unique_frames.append((timedelta(seconds=count / fps), cropped))
+        
+        previous_frame = cropped
+            
+    return unique_frames
+        
 
 def remove_ascii(text):
     return ''.join([i if ord(i) < 128 else ' ' for i in text])
 
 def frames_to_text(frames):
+    print("Reading text from frames...")
     reader = Reader(['en', 'ko'], gpu=False)
     lines = []
     for frame in tqdm(frames):
@@ -93,7 +89,6 @@ def frames_to_text(frames):
         line = reader.readtext(image, detail=0, paragraph=True)
         line = line[-1] if len(line) > 0 else ""
         line = remove_ascii(line)
-
         lines.append((frame[0], line))
     
     return lines
@@ -134,10 +129,12 @@ def remove_invalid_lines(timed_lines):
     engDict = enchant.Dict("en_US")
     
     valid_lines = []
-    for _, line in timed_lines:
+    for time, line in timed_lines:
         valid_num_spaces = line.count(' ') > int(len(line) / 10)              
         valid_num_eng_words = len([word for word in line.split() if engDict.check(word)]) > len(line.split()) / 4
-        # instead of rejection I should be adding on thats why its ending early I think
+        
+        if valid_num_spaces and valid_num_eng_words:
+            valid_lines.append((time, line))
     
     return valid_lines
 
@@ -148,18 +145,20 @@ def text_to_captions(lines, delay):
         beginning = format_timedelta(line1[0] + timedelta(milliseconds=delay))
         end = format_timedelta(line2[0] + timedelta(milliseconds=delay))
         caption = Caption(beginning, end, line1[1])
-        
         vtt.captions.append(caption)
     return vtt
 
 if __name__ == "__main__":
     video_file = sys.argv[1]
-    frames = ccl_to_frames(video_file)
-    lines = frames_to_text(frames)
-    pickle.dump(lines, open("spicy.pkl", "wb"))
-    
-    lines = pickle.load(open("spicy.pkl", "rb"))
+    song_name = sys.argv[2]
+    generate_new = len(sys.argv) > 3 and sys.argv[3] == "new"
+    if not os.path.exists(f"{video_file}.pkl") or generate_new:
+        frames = ccl_to_frames(video_file, f'./{song_name}')
+        lines = frames_to_text(frames)
+        pickle.dump(lines, open(f"{song_name}.pkl", "wb"))
+        
+    lines = pickle.load(open(f"{song_name}.pkl", "rb"))
     lines = remove_duplicate_lines(lines)
     lines = remove_invalid_lines(lines)
     captions = text_to_captions(lines, 700)
-    captions.save("captions.vtt")
+    captions.save(f"{song_name}.vtt")
