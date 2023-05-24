@@ -13,6 +13,7 @@ import difflib
 import pickle
 from webvtt import WebVTT, Caption
 import enchant
+import re
 
 def format_timedelta(td: timedelta) -> str:
     """Utility function to format timedelta objects in a cool way (e.g 00:00:20.05) 
@@ -42,12 +43,15 @@ def is_different_frame(frame1: np.ndarray, frame2: np.ndarray) -> bool:
     return mse_between_frames(frame1, frame2) > 0.5
 
 def ccl_to_frames(video_file: str, dir = './recent'):
+    if not os.path.exists(dir):
+        os.makedirs(dir)
+    
     print("Converting ccl to frames...")
     cap = cv2.VideoCapture(video_file)
     fps = cap.get(cv2.CAP_PROP_FPS)
     
-    frame_x_begin = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) * 0.56)
-    frame_x_end = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    frame_x_begin = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) * 0.54)
+    frame_x_end = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) * 0.965)
     frame_y = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     
     count = 0
@@ -55,6 +59,7 @@ def ccl_to_frames(video_file: str, dir = './recent'):
     transitioning = False
     previous_frame = None
     pre_transition_frame = None
+    success = 0
     while True:
         read, frame = cap.read()
         if not read:
@@ -62,22 +67,26 @@ def ccl_to_frames(video_file: str, dir = './recent'):
         
         cropped = frame[frame_x_begin:frame_x_end, 0:frame_y]
         count += 1
+        previous_frame_and_cropped_different = is_different_frame(previous_frame, cropped)
+        # Don't know why but pretransition frame always needs to be before cropped???
+        cropped_and_pre_transition_frame_different = is_different_frame(pre_transition_frame, cropped)
         
-        if is_different_frame(previous_frame, cropped) and not transitioning:
+        if previous_frame_and_cropped_different and not transitioning:
             transitioning = True
             pre_transition_frame = previous_frame
-            print("Found transition start with mse: ", mse_between_frames(previous_frame, cropped), " and time: ", timedelta(seconds=count / fps))
-        elif not is_different_frame(previous_frame, cropped) and is_different_frame(cropped, pre_transition_frame) and transitioning:
+            print("Found transition start with mse:", mse_between_frames(previous_frame, cropped), " at time", timedelta(seconds=count / fps))
+        elif not previous_frame_and_cropped_different and cropped_and_pre_transition_frame_different and transitioning:
             transitioning = False
-            print("Found new unique frame with mse: ", mse_between_frames(previous_frame, cropped), " and time: ", timedelta(seconds=count / fps))
+            print("Found new unique frame with mse:", mse_between_frames(previous_frame, cropped), "at time", timedelta(seconds=count / fps), "and success:", success)
             unique_frames.append((timedelta(seconds=count / fps), cropped))
+            cv2.imwrite(os.path.join(dir, f"{format_timedelta(timedelta(seconds=count))}.jpg"), cropped)    
+            success += 1
         
         previous_frame = cropped
-            
     return unique_frames
         
 
-def remove_ascii(text):
+def remove_ascii(text: str) -> str:
     return ''.join([i if ord(i) < 128 else ' ' for i in text])
 
 def frames_to_text(frames):
@@ -93,7 +102,7 @@ def frames_to_text(frames):
     
     return lines
 
-def formatted_time_to_time_delta(formatted_time):
+def formatted_time_to_time_delta(formatted_time: str) -> timedelta:
     time = formatted_time.split(":")
     hours = int(time[0])
     minutes = int(time[1])
@@ -102,7 +111,7 @@ def formatted_time_to_time_delta(formatted_time):
     
     return timedelta(hours=hours, minutes=minutes, seconds=seconds, milliseconds=milliseconds)
 
-def preprocess_image(image):
+def preprocess_image(image: np.ndarray) -> np.ndarray:
     image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     image = cv2.threshold(image, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
     image = cv2.resize(image, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
@@ -138,27 +147,51 @@ def remove_invalid_lines(timed_lines):
     
     return valid_lines
 
-def text_to_captions(lines, delay):
+def spell_check(timed_lines):
+    spell_checked_lines = []
+    for time, line in timed_lines:
+        line = line.replace(';', '')
+        # sentences = re.findall('[A-Z][^A-Z]*', line)
+        # spell_checked_line = ''.join([str(TextBlob(sentence).correct()) for sentence in sentences])
+        # spell_checked_lines.append((time, spell_checked_line))
+        # print("line: ", line, " vs spell checked line: ", spell_checked_line, " at time: ", time)
+        spell_checked_lines.append((time, line))
+    
+    return spell_checked_lines
+
+def text_to_captions(lines, delay: int = 0) -> WebVTT:
     vtt = WebVTT()
-    for line1, line2 in zip(lines, lines[1:]):
-        # Add 0.7 seconds cos ccl is badly timed
-        beginning = format_timedelta(line1[0] + timedelta(milliseconds=delay))
-        end = format_timedelta(line2[0] + timedelta(milliseconds=delay))
-        caption = Caption(beginning, end, line1[1])
+    for line in lines:
+        beginning = format_timedelta(line[0] + timedelta(milliseconds=delay))
+        end = format_timedelta(line[0] + timedelta(milliseconds=delay))
+        caption = Caption(beginning, end, line[1])
+        print(line)
         vtt.captions.append(caption)
     return vtt
 
+# Python arg parser instead of this bullshit
 if __name__ == "__main__":
     video_file = sys.argv[1]
-    song_name = sys.argv[2]
+    song_name = sys.argv[2] if len(sys.argv) > 2 else video_file
     generate_new = len(sys.argv) > 3 and sys.argv[3] == "new"
     if not os.path.exists(f"{video_file}.pkl") or generate_new:
         frames = ccl_to_frames(video_file, f'./{song_name}')
         lines = frames_to_text(frames)
         pickle.dump(lines, open(f"{song_name}.pkl", "wb"))
-        
     lines = pickle.load(open(f"{song_name}.pkl", "rb"))
     lines = remove_duplicate_lines(lines)
     lines = remove_invalid_lines(lines)
+    lines = spell_check(lines)
     captions = text_to_captions(lines, 700)
     captions.save(f"{song_name}.vtt")
+
+def video_file_to_captions(video_file: str) -> WebVTT:
+    frames = ccl_to_frames(video_file, f'./{song_name}')
+    lines = frames_to_text(frames)
+    lines = remove_duplicate_lines(lines)
+    lines = remove_invalid_lines(lines)
+    captions = text_to_captions(lines, 800)
+    return captions
+
+#1:45 Every day the same old same old Time now to toss that rule Aespa spicy seems to start a couple seconds late??? FIx bug
+# Same with 1:59
