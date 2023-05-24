@@ -77,7 +77,7 @@ def ccl_to_frames(video_file, dir = './recent'):
             prev_frame = frame
             print(f"Writing frame {frame_duration_formatted}")
             cv2.imwrite(os.path.join(dir, f"{frame_duration_formatted}.jpg"), frame)
-            frames.append((frame_duration_formatted, frame))
+            frames.append((timedelta(seconds=frame_duration), frame))
             
         count += 1
     return frames
@@ -114,31 +114,41 @@ def preprocess_image(image):
     image = cv2.medianBlur(image,5)
     return image
 
-def remove_duplicate_lines(results):
+# Kinda bad code design to only be able to pass timed_lines and not lines???
+def remove_duplicate_lines(timed_lines):
     processed = []
-    engDict = enchant.Dict("en_US")
-    for result1, result2 in zip(results[1:], results):
-        spaceless_line1 = result1[1].replace(' ', '')
-        spaceless_line2 = result2[1].replace(' ', '')
-        line = result1[1]  
-        output_list = [li for li in difflib.ndiff(spaceless_line1, spaceless_line2) if li[0] != ' ']
+
+    # Check whetehr the [1:] in first bugs it
+    for second_timed_line, first_timed_line in zip(timed_lines[1:], timed_lines):
+        first_spaceless_line = first_timed_line[1].replace(' ', '')
+        second_spaceless_line = second_timed_line[1].replace(' ', '')
+        output_list = [li for li in difflib.ndiff(first_spaceless_line, second_spaceless_line) if li[0] != ' ']
         
-        valid_num_spaces = line.count(' ') > int(len(line) / 10)              
-        valid_num_eng_words = len([word for word in line.split() if engDict.check(word)]) > len(line.split()) / 4
-        # instead of rejection I should be adding on thats why its ending early I think
-        valid_diff = len(output_list) > len(spaceless_line1) / 3
-        print(valid_num_spaces, valid_num_eng_words, valid_diff, line, result1[0])
-        if valid_num_spaces and valid_num_eng_words and valid_diff:
-            # text = TextBlob(line)
-            processed.append((result1[0], line))
-            # processed.append((result1[0], str(text.correct())))
+        valid_diff = len(output_list) > len(first_spaceless_line) / 3
+        if valid_diff:
+            processed.append(first_timed_line)
 
     return processed
 
-def text_to_captions(lines):
+def remove_invalid_lines(timed_lines):
+    engDict = enchant.Dict("en_US")
+    
+    valid_lines = []
+    for _, line in timed_lines:
+        valid_num_spaces = line.count(' ') > int(len(line) / 10)              
+        valid_num_eng_words = len([word for word in line.split() if engDict.check(word)]) > len(line.split()) / 4
+        # instead of rejection I should be adding on thats why its ending early I think
+    
+    return valid_lines
+
+def text_to_captions(lines, delay):
     vtt = WebVTT()
     for line1, line2 in zip(lines, lines[1:]):
-        caption = Caption(line1[0], line2[0], line1[1])
+        # Add 0.7 seconds cos ccl is badly timed
+        beginning = format_timedelta(line1[0] + timedelta(milliseconds=delay))
+        end = format_timedelta(line2[0] + timedelta(milliseconds=delay))
+        caption = Caption(beginning, end, line1[1])
+        
         vtt.captions.append(caption)
     return vtt
 
@@ -150,5 +160,6 @@ if __name__ == "__main__":
     
     lines = pickle.load(open("spicy.pkl", "rb"))
     lines = remove_duplicate_lines(lines)
-    captions = text_to_captions(lines)
+    lines = remove_invalid_lines(lines)
+    captions = text_to_captions(lines, 700)
     captions.save("captions.vtt")
