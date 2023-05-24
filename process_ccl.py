@@ -6,13 +6,9 @@ from easyocr import Reader
 from tqdm import tqdm
 import os
 import itertools
-from spellchecker import SpellChecker
-from textblob import TextBlob
-import pytesseract
 import difflib
 import pickle
 from webvtt import WebVTT, Caption
-import enchant
 import re
 
 def format_timedelta(td: timedelta) -> str:
@@ -66,20 +62,23 @@ def ccl_to_frames(video_file: str, dir = './recent'):
             break
         
         cropped = frame[frame_x_begin:frame_x_end, 0:frame_y]
+        curr_time = timedelta(seconds=count / fps)
         count += 1
-        previous_frame_and_cropped_different = is_different_frame(previous_frame, cropped)
-        # Don't know why but pretransition frame always needs to be before cropped???
-        cropped_and_pre_transition_frame_different = is_different_frame(pre_transition_frame, cropped)
         
-        if previous_frame_and_cropped_different and not transitioning:
+        
+        is_prev_curr_and_different = is_different_frame(previous_frame, cropped)
+        # Don't know why but pretransition frame always needs to be before cropped???
+        is_prev_trans_and_curr_different = is_different_frame(pre_transition_frame, cropped)
+        is_prev_frame_too_soon = curr_time - unique_frames[-1][0] > timedelta(milliseconds=500) if len(unique_frames) > 0 else True
+        if is_prev_curr_and_different and not transitioning:
             transitioning = True
             pre_transition_frame = previous_frame
-            print("Found transition start with mse:", mse_between_frames(previous_frame, cropped), " at time", timedelta(seconds=count / fps))
-        elif not previous_frame_and_cropped_different and cropped_and_pre_transition_frame_different and transitioning:
+            print("Found transition start with mse:", mse_between_frames(previous_frame, cropped), " at time", curr_time)
+        elif not is_prev_curr_and_different and is_prev_trans_and_curr_different and transitioning and is_prev_frame_too_soon:
             transitioning = False
-            print("Found new unique frame with mse:", mse_between_frames(previous_frame, cropped), "at time", timedelta(seconds=count / fps), "and success:", success)
+            print("Found new unique frame with mse:", mse_between_frames(previous_frame, cropped), "at time", curr_time, "and success:", success)
             unique_frames.append((timedelta(seconds=count / fps), cropped))
-            cv2.imwrite(os.path.join(dir, f"{format_timedelta(timedelta(seconds=count))}.jpg"), cropped)    
+            cv2.imwrite(os.path.join(dir, f"{format_timedelta(curr_time)}.jpg"), cropped)    
             success += 1
         
         previous_frame = cropped
@@ -136,14 +135,14 @@ def remove_duplicate_lines(timed_lines):
     return processed
 
 def remove_invalid_lines(timed_lines):
-    engDict = enchant.Dict("en_US")
+    # engDict = enchant.Dict("en_US")
     
     valid_lines = []
     for time, line in timed_lines:
         valid_num_spaces = line.count(' ') > int(len(line) / 10)              
-        valid_num_eng_words = len([word for word in line.split() if engDict.check(word)]) > len(line.split()) / 4
+        # valid_num_eng_words = len([word for word in line.split() if engDict.check(word)]) > len(line.split()) / 4
         
-        if valid_num_spaces and valid_num_eng_words:
+        if valid_num_spaces:
             valid_lines.append((time, line))
     
     return valid_lines
@@ -152,6 +151,14 @@ def spell_check(timed_lines):
     spell_checked_lines = []
     for time, line in timed_lines:
         line = line.replace(';', '')
+        
+        num_forward_brackets = line.count('[')
+        num_backward_brackets = line.count(']')
+        if num_forward_brackets != num_backward_brackets:
+            line = line.replace('[', 'I')
+            line = line.replace(']', 'I')
+
+        line = line.replace(' d ', ' a ')
         # sentences = re.findall('[A-Z][^A-Z]*', line)
         # spell_checked_line = ''.join([str(TextBlob(sentence).correct()) for sentence in sentences])
         # spell_checked_lines.append((time, spell_checked_line))
@@ -176,22 +183,24 @@ if __name__ == "__main__":
     video_file = sys.argv[1]
     song_name = sys.argv[2] if len(sys.argv) > 2 else video_file
     generate_new = len(sys.argv) > 3 and sys.argv[3] == "new"
-    if not os.path.exists(f"{video_file}.pkl") or generate_new:
+    if not os.path.exists(f"./{song_name}/{song_name}.pkl") or generate_new:
         frames = ccl_to_frames(video_file, f'./{song_name}')
         lines = frames_to_text(frames)
-        pickle.dump(lines, open(f"{song_name}.pkl", "wb"))
-    lines = pickle.load(open(f"{song_name}.pkl", "rb"))
+        pickle.dump(lines, open(f"./{song_name}/{song_name}.pkl", "wb"))
+    lines = pickle.load(open(f"./{song_name}/{song_name}.pkl", "rb"))
     lines = remove_duplicate_lines(lines)
-    lines = remove_invalid_lines(lines)
+    # lines = remove_invalid_lines(lines)
+    for line in lines:
+        print(line)
     lines = spell_check(lines)
     captions = text_to_captions(lines, 700)
-    captions.save(f"{song_name}.vtt")
+    captions.save(f"./{song_name}/{song_name}.vtt")
 
 def video_file_to_captions(video_file: str) -> WebVTT:
     frames = ccl_to_frames(video_file, f'./{song_name}')
     lines = frames_to_text(frames)
     lines = remove_duplicate_lines(lines)
-    lines = remove_invalid_lines(lines)
+    # lines = remove_invalid_lines(lines)
     captions = text_to_captions(lines, 750)
     return captions
 
