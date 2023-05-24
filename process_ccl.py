@@ -123,14 +123,15 @@ def remove_duplicate_lines(timed_lines):
     processed = []
 
     # Check whetehr the [1:] in first bugs it
-    for second_timed_line, first_timed_line in zip(timed_lines[1:], timed_lines):
+    timed_lines.insert(0, (timedelta(seconds=0), ""))
+    for first_timed_line, second_timed_line in zip(timed_lines, timed_lines[1:]):
         first_spaceless_line = first_timed_line[1].replace(' ', '')
         second_spaceless_line = second_timed_line[1].replace(' ', '')
         output_list = [li for li in difflib.ndiff(first_spaceless_line, second_spaceless_line) if li[0] != ' ']
         
-        valid_diff = len(output_list) > len(first_spaceless_line) / 3
-        if valid_diff:
-            processed.append(first_timed_line)
+        is_different = len(output_list) > len(first_spaceless_line) / 3
+        if is_different:
+            processed.append(second_timed_line)
 
     return processed
 
@@ -161,12 +162,13 @@ def spell_check(timed_lines):
 
 def text_to_captions(lines, delay: int = 0) -> WebVTT:
     vtt = WebVTT()
-    for line in lines:
-        beginning = format_timedelta(line[0] + timedelta(milliseconds=delay))
-        end = format_timedelta(line[0] + timedelta(milliseconds=delay))
-        caption = Caption(beginning, end, line[1])
-        print(line)
+    for first_line, second_line in zip(lines, lines[1:]):
+        beginning = format_timedelta(first_line[0] + timedelta(milliseconds=delay))
+        end = format_timedelta(second_line[0] + timedelta(milliseconds=delay))
+        caption = Caption(beginning, end, first_line[1])
         vtt.captions.append(caption)
+        
+    vtt.captions.append(Caption(format_timedelta(lines[-1][0] + timedelta(milliseconds=delay)), format_timedelta(lines[-1][0] + timedelta(seconds=5)), lines[-1][1]))
     return vtt
 
 # Python arg parser instead of this bullshit
@@ -190,7 +192,7 @@ def video_file_to_captions(video_file: str) -> WebVTT:
     lines = frames_to_text(frames)
     lines = remove_duplicate_lines(lines)
     lines = remove_invalid_lines(lines)
-    captions = text_to_captions(lines, 800)
+    captions = text_to_captions(lines, 750)
     return captions
 
 #1:45 Every day the same old same old Time now to toss that rule Aespa spicy seems to start a couple seconds late??? FIx bug
