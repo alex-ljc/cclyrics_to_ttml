@@ -46,8 +46,9 @@ def ccl_to_frames(video_file: str, dir = './recent'):
     cap = cv2.VideoCapture(video_file)
     fps = cap.get(cv2.CAP_PROP_FPS)
     
-    frame_x_begin = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) * 0.54)
-    frame_x_end = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) * 0.965)
+    # Hardcoded Crop... I should figure out a way to detect cropped boundaries
+    frame_x_begin = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) * 0.8)
+    frame_x_end = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) * 0.967)
     frame_y = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     
     count = 0
@@ -67,21 +68,23 @@ def ccl_to_frames(video_file: str, dir = './recent'):
         
         
         is_prev_curr_and_different = is_different_frame(previous_frame, cropped)
+        
         # Don't know why but pretransition frame always needs to be before cropped???
         is_prev_trans_and_curr_different = is_different_frame(pre_transition_frame, cropped)
         is_prev_frame_too_soon = curr_time - unique_frames[-1][0] > timedelta(milliseconds=500) if len(unique_frames) > 0 else True
         if is_prev_curr_and_different and not transitioning:
             transitioning = True
             pre_transition_frame = previous_frame
-            print("Found transition start with mse:", mse_between_frames(previous_frame, cropped), " at time", curr_time)
+            # print("Found transition start with mse:", mse_between_frames(previous_frame, cropped), " at time", curr_time)
         elif not is_prev_curr_and_different and is_prev_trans_and_curr_different and transitioning and is_prev_frame_too_soon:
             transitioning = False
-            print("Found new unique frame with mse:", mse_between_frames(previous_frame, cropped), "at time", curr_time, "and success:", success)
+            # print("Found new unique frame with mse:", mse_between_frames(previous_frame, cropped), "at time", curr_time, "and success:", success)
             unique_frames.append((timedelta(seconds=count / fps), cropped))
             cv2.imwrite(os.path.join(dir, f"{format_timedelta(curr_time)}.jpg"), cropped)    
             success += 1
         
         previous_frame = cropped
+    print("Found", len(unique_frames), "unique frames.")
     return unique_frames
         
 
@@ -94,6 +97,7 @@ def frames_to_text(frames):
     lines = []
     for frame in tqdm(frames):
         image = preprocess_image(frame[1])
+        # cv2.imwrite(f"./recent/{frame[0]}.jpg", image)
         line = reader.readtext(image, detail=0, paragraph=True)
         line = line[-1] if len(line) > 0 else ""
         line = remove_ascii(line)
@@ -110,9 +114,30 @@ def formatted_time_to_time_delta(formatted_time: str) -> timedelta:
     
     return timedelta(hours=hours, minutes=minutes, seconds=seconds, milliseconds=milliseconds)
 
+def crop(image: np.ndarray, leeway: int = 10) -> np.ndarray:
+    first_horizontal = None
+    last_horizontal = None
+    first_vertical = None
+    last_vertical = None
+    for x, pixels in enumerate(image):
+        for y, pixel in enumerate(pixels):
+            if pixel != 0:
+                first_horizontal = min(first_horizontal, x) if first_horizontal is not None else x
+                last_horizontal = max(last_horizontal, x) if last_horizontal is not None else x
+                first_vertical = min(first_vertical, y) if first_vertical is not None else y
+                last_vertical = max(last_vertical, y) if last_vertical is not None else y
+    
+    first_horizontal = max(0, first_horizontal - leeway)
+    last_horizontal = min(image.shape[0], last_horizontal + leeway)
+    first_vertical = max(0, first_vertical - leeway)
+    last_vertical = min(image.shape[1], last_vertical + leeway)
+    
+    return image[first_horizontal:last_horizontal, first_vertical:last_vertical]
+
 def preprocess_image(image: np.ndarray) -> np.ndarray:
     image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     image = cv2.threshold(image, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
+    image = crop(image)
     image = cv2.resize(image, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
     image = cv2.medianBlur(image,5)
     return image
@@ -121,7 +146,6 @@ def preprocess_image(image: np.ndarray) -> np.ndarray:
 def remove_duplicate_lines(timed_lines):
     processed = []
 
-    # Check whetehr the [1:] in first bugs it
     timed_lines.insert(0, (timedelta(seconds=0), ""))
     for first_timed_line, second_timed_line in zip(timed_lines, timed_lines[1:]):
         first_spaceless_line = first_timed_line[1].replace(' ', '')
@@ -157,7 +181,10 @@ def spell_check(timed_lines):
         if num_forward_brackets != num_backward_brackets:
             line = line.replace('[', 'I')
             line = line.replace(']', 'I')
-
+        line = line.replace('1 ', 'I ')
+        line = line.replace(' [ ', ' I ')
+        line = line.replace(' 1 ', ' I ')
+        line = line.replace(' ] ', ' I ')
         line = line.replace(' d ', ' a ')
         # sentences = re.findall('[A-Z][^A-Z]*', line)
         # spell_checked_line = ''.join([str(TextBlob(sentence).correct()) for sentence in sentences])
@@ -167,11 +194,11 @@ def spell_check(timed_lines):
     
     return spell_checked_lines
 
-def text_to_captions(lines, delay: int = 0) -> WebVTT:
+def text_to_captions(lines, lag: int = 700, delay: int = 0) -> WebVTT:
     vtt = WebVTT()
     for first_line, second_line in zip(lines, lines[1:]):
-        beginning = format_timedelta(first_line[0] + timedelta(milliseconds=delay))
-        end = format_timedelta(second_line[0] + timedelta(milliseconds=delay))
+        beginning = format_timedelta(first_line[0] + timedelta(milliseconds=(delay + lag)))
+        end = format_timedelta(second_line[0] + timedelta(milliseconds=(delay + lag)))
         caption = Caption(beginning, end, first_line[1])
         vtt.captions.append(caption)
         
@@ -189,12 +216,9 @@ if __name__ == "__main__":
         pickle.dump(lines, open(f"./{song_name}/{song_name}.pkl", "wb"))
     lines = pickle.load(open(f"./{song_name}/{song_name}.pkl", "rb"))
     lines = remove_duplicate_lines(lines)
-    # lines = remove_invalid_lines(lines)
-    for line in lines:
-        print(line)
     lines = spell_check(lines)
-    captions = text_to_captions(lines, 700)
-    captions.save(f"./{song_name}/{song_name}.vtt")
+    captions = text_to_captions(lines, delay = 0, lag = 750)
+    captions.save(f"./subs/{song_name}.vtt")
 
 def video_file_to_captions(video_file: str) -> WebVTT:
     frames = ccl_to_frames(video_file, f'./{song_name}')
