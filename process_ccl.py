@@ -1,15 +1,22 @@
+import difflib
+import itertools
+import os
+import pickle
+import re
 import sys
 from datetime import timedelta
+
 import cv2
 import numpy as np
 from easyocr import Reader
+from lyricsgenius import Genius
 from tqdm import tqdm
-import os
-import itertools
-import difflib
-import pickle
-from webvtt import WebVTT, Caption
-import re
+from webvtt import Caption, WebVTT
+from youtube_search import YoutubeSearch
+from yt_dlp import YoutubeDL
+from typing import List
+import glob
+
 
 def format_timedelta(td: timedelta) -> str:
     """Utility function to format timedelta objects in a cool way (e.g 00:00:20.05) 
@@ -115,10 +122,10 @@ def formatted_time_to_time_delta(formatted_time: str) -> timedelta:
     return timedelta(hours=hours, minutes=minutes, seconds=seconds, milliseconds=milliseconds)
 
 def crop(image: np.ndarray, leeway: int = 10) -> np.ndarray:
-    first_horizontal = None
-    last_horizontal = None
-    first_vertical = None
-    last_vertical = None
+    first_horizontal = 10000
+    last_horizontal = 0
+    first_vertical = 10000
+    last_vertical = 0
     for x, pixels in enumerate(image):
         for y, pixel in enumerate(pixels):
             if pixel != 0:
@@ -131,7 +138,7 @@ def crop(image: np.ndarray, leeway: int = 10) -> np.ndarray:
     last_horizontal = min(image.shape[0], last_horizontal + leeway)
     first_vertical = max(0, first_vertical - leeway)
     last_vertical = min(image.shape[1], last_vertical + leeway)
-    
+    print(first_horizontal, last_horizontal, first_vertical, last_vertical)
     return image[first_horizontal:last_horizontal, first_vertical:last_vertical]
 
 def preprocess_image(image: np.ndarray) -> np.ndarray:
@@ -182,10 +189,15 @@ def spell_check(timed_lines):
             line = line.replace('[', 'I')
             line = line.replace(']', 'I')
         line = line.replace('1 ', 'I ')
+        line = line.replace(' 0 ', ' a ')
         line = line.replace(' [ ', ' I ')
         line = line.replace(' 1 ', ' I ')
         line = line.replace(' ] ', ' I ')
         line = line.replace(' d ', ' a ')
+        
+        for word in line.split():
+            # Make sure word is properly capitalized
+            word = word[0] + word[1:].lower()
         # sentences = re.findall('[A-Z][^A-Z]*', line)
         # spell_checked_line = ''.join([str(TextBlob(sentence).correct()) for sentence in sentences])
         # spell_checked_lines.append((time, spell_checked_line))
@@ -205,6 +217,61 @@ def text_to_captions(lines, lag: int = 700, delay: int = 0) -> WebVTT:
     vtt.captions.append(Caption(format_timedelta(lines[-1][0] + timedelta(milliseconds=delay)), format_timedelta(lines[-1][0] + timedelta(seconds=5)), lines[-1][1]))
     return vtt
 
+
+
+def video_file_to_captions(video_file: str) -> WebVTT:
+    frames = ccl_to_frames(video_file, f'./{song_name}')
+    lines = frames_to_text(frames)
+    lines = remove_duplicate_lines(lines)
+    # lines = remove_invalid_lines(lines)
+    captions = text_to_captions(lines, 750)
+    return captions
+
+def get_youtube_link(search_term: str) -> str:
+    prefix = 'https://www.youtube.com'
+    
+    results = YoutubeSearch(search_term, max_results=1).to_dict()[0]
+
+    return prefix + results['url_suffix']
+
+def download_videos(url: str, title: str, path: str):
+    if not os.path.exists(path):
+        os.mkdir(path)
+        
+    ydl_opts = {'paths': {'home': path}, 
+                'outtmpl': f'{title}.%(ext)s',
+                'writesubtitles': True,
+                'subtitleslangs': ['en'],}
+
+    with YoutubeDL(ydl_opts) as ydl:
+        ydl.download(url)
+
+def download_subs_from_youtube(url: str, title: str, path: str) -> bool:
+    if not os.path.exists(path):
+        os.mkdir(path)
+        
+    ydl_opts = {'paths': {'home': path}, 
+                'outtmpl': f'{title}.%(ext)s',
+                'writesubtitles': True,
+                'subtitleslangs': ['en-GB', 'en', 'en-US'],
+                'skip_download': True,}
+    
+    with YoutubeDL(ydl_opts) as ydl:
+        ydl.download(url)
+        
+    # Shit code who cares; I do, cries :(
+    if os.path.exists(f'{title}.en.vtt'):
+        os.rename(f'{title}.en.vtt', f'{title}.vtt')
+        return True
+    elif os.path.exists(f'{title}.en-GB.vtt'):
+        os.rename(f'{title}.en-GB.vtt', f'{title}.vtt')
+        return True
+    elif os.path.exists(f'{title}.en-US.vtt'):
+        os.rename(f'{title}.en-US.vtt', f'{title}.vtt')
+        return True
+    else:
+        return False
+        
 # Python arg parser instead of this bullshit
 if __name__ == "__main__":
     video_file = sys.argv[1]
@@ -217,16 +284,33 @@ if __name__ == "__main__":
     lines = pickle.load(open(f"./{song_name}/{song_name}.pkl", "rb"))
     lines = remove_duplicate_lines(lines)
     lines = spell_check(lines)
+    pickle.dump(lines, open(f"./{song_name}/{song_name}_processed.pkl", "wb"))
     captions = text_to_captions(lines, delay = 0, lag = 750)
     captions.save(f"./subs/{song_name}.vtt")
+    
+    
+def download_subs(artists: List[str], song_names: List[str], delays: List[int], sub_path: str, ccl_path: str):
+    songs = [f'{s[0]} - {s[1]}' for s in list(zip(artists, song_names, delays))]
+    ccl_songs = [song for song in songs if not download_subs_from_youtube(get_youtube_link(song[0], song[1]), song[1], sub_path)]
+    
+    for song in ccl_songs:
+        download_videos(get_youtube_link(song[0], song[1]), song[1], ccl_path)
+    
+    file_names = [f"{song[0]} - {song[1]}" for song in ccl_songs]
+    for file in file_names:
+        if len(glob.glob(f"{ccl_path}/{file}*")) == 0:
+            continue
+        
+        video_file = glob.glob(f"{ccl_path}/{file}*")[0]
+        frames = ccl_to_frames(video_file, f'./{file}')
+        lines = frames_to_text(frames)
+        lines = remove_duplicate_lines(lines)
+        lines = spell_check(lines)
+        captions = text_to_captions(lines, delay = 0, lag = 750)
+        captions.save(f"{path}/{file}.vtt")
+    
 
-def video_file_to_captions(video_file: str) -> WebVTT:
-    frames = ccl_to_frames(video_file, f'./{song_name}')
-    lines = frames_to_text(frames)
-    lines = remove_duplicate_lines(lines)
-    # lines = remove_invalid_lines(lines)
-    captions = text_to_captions(lines, 750)
-    return captions
-
+        
+    
 #1:45 Every day the same old same old Time now to toss that rule Aespa spicy seems to start a couple seconds late??? FIx bug
 # Same with 1:59
